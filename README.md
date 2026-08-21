@@ -65,18 +65,74 @@ crosses zero, and it guards against surface ballooning at the plume centre when 
 network changes over time, using a robust slope, a sign check against the raw mean-concentration
 trend, and an OLS-versus-robust agreement test.
 
-## Validation record, and where the evidence lives
+## Validation harnesses
 
-These numbers come from harnesses that are **not included in this repository**, so they are
-reported here as claims rather than as something a reader can re-run from this tree:
+`validation/` holds the evidence. Each script is runnable from this tree with
+`PYTHONPATH` set to the repository root, and the figures and CSVs land in
+`outputs/validation/`. The numbers below were reproduced from this tree, not copied from
+elsewhere.
 
-- **Method 2 against EPA REMChlor.** On a REMChlor-equivalent centreline with a known
-  `k = 0.5/yr`, Method 2 recovered 0.52/yr while the raw un-normalized slope returned 0.81/yr.
-  The 61% overstatement is the transverse dilution the normalization removes.
-- **Method 3 against R `mgcv`.** A `te(bs="ps", method="REML")` cross-fit agreed to r = 0.999
-  and recovered the known rate on synthetic plumes to better than 2%.
-- **Method 2, 1D against 2D.** On synthetic truth the 2D variant recovered `k` roughly three
-  times more accurately (mean absolute error 62% against 185%) and also recovered `alpha_y`.
+**Method 2 against EPA REMChlor.** REMChlor's plume is a Domenico-family streamtube model with
+a first-order decay rate, so Method 2 inverts exactly that model.
+
+```bash
+python validation/validate_remchlor.py --selftest
+```
+
+On a REMChlor-equivalent centreline with a known `k = 0.5/yr`, Method 2 returns **0.5197/yr**
+(+3.9%) while the raw un-normalized slope returns **0.8050/yr** (+61.0%). The difference is the
+transverse dilution the normalization removes. Methods 1 and 3 return `nan` here by design,
+because a single centreline carries no time series for them to work on.
+
+REMChlor cannot be driven headlessly (GUI plus an undocumented Fortran namelist), so
+`build_remchlor_workbook.py` writes `REMChlor_validation.xlsx` with the prescribed scenario and
+in-cell PASS/FAIL checks. Run REMChlor yourself, paste its output, then run
+`validate_remchlor.py` on the filled workbook for the full external comparison. The self-test
+above proves the loop end to end without needing REMChlor installed.
+
+**Method 3 against R `mgcv`.** Requires R with `mgcv`. Put `Rscript` on `PATH` or set the
+`RSCRIPT` environment variable.
+
+```bash
+python validation/validate_mgcv.py
+```
+
+Fits the same data with `te(bs="ps", method="REML")` and compares. On three synthetic plumes
+with known rates the surfaces agree at **r = 0.9986 to 0.9997** and both recover the known rate:
+0.20 against 0.2031, 0.05 against 0.0498, 0.40 against 0.4028. Verdict PASS. Point `SITE_DIR` at
+one data-rich site folder to add a no-truth cross-check on field data.
+
+**Method 2, 1D against 2D.**
+
+```bash
+python validation/bakeoff_2d.py
+```
+
+On synthetic truth the 2D variant recovers `k` roughly three times more accurately, mean
+absolute error **62% against 183%**, and also recovers `alpha_y`. Note that both are poor in
+absolute terms: this bake-off is why the README calls Method 2 parameter-sensitive.
+
+**Method 3 against Method 1.**
+
+```bash
+python validation/bakeoff_spline_decay.py
+```
+
+Ten seeds at each of six truth-and-noise combinations. Mean absolute bias **0.020 for the
+spline against 0.035 for Method 1**, with comparable instability (mean SD 0.029 against 0.028).
+The spline is the more accurate of the two and not more stable.
+
+**Portfolio report.** Reads the handoff JSONs from a run directory and emits coverage,
+rate-distribution, consistency and Method-2-reliability panels plus summary CSVs.
+
+```bash
+python validation/portfolio_report.py --dir outputs/rates
+```
+
+**`bakeoff_dispersivity.py` cannot run here.** Both of its parts compare Method 2 against the
+site-initialization `ContinuousDecay` dispersivity model, which is production code and is not
+included. The file is kept as a record of what was tested and how; running it prints that and
+exits.
 
 ## Known limitations
 
@@ -97,7 +153,9 @@ reported here as claims rather than as something a reader can re-run from this t
    Dispersivity dominates the uncertainty, which is why the rate is reported with a Monte-Carlo
    band and an explicit sweep over assumed `alpha_x`.
 6. **The QA/QC figure modules are not included.** Methods 2 and 3 still emit a `qaqc` payload of
-   compact arrays intended for a renderer; no renderer ships here.
+   compact arrays intended for a renderer; no renderer ships here. `portfolio_report.py` in
+   `validation/` draws its own figures and is unaffected.
+7. **One validation harness cannot run.** See `bakeoff_dispersivity.py` above.
 
 ## Data
 
