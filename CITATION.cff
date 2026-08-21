@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+title: "biodeg-rate-methods: three independent estimators of a bulk groundwater attenuation rate"
+message: "If you use this software, please cite it."
+type: software
+version: 0.1.0
+license: MIT
+abstract: >-
+  Three independent estimators of a bulk attenuation rate for a dissolved groundwater
+  contaminant (Mann-Kendall with a Theil-Sen slope, Domenico-normalized concentration
+  against distance, and a spatio-temporal penalized spline), kept separate by construction,
+  with a literature-prior combine and a MODFLOW 6 handoff writer.
+authors:
+  # TODO confirm the author list and add ORCIDs before sharing.
+  - family-names: Siciliano
+    given-names: Steven
+    affiliation: "Environmental Material Science Inc."
+references:
+  - type: article
+    authors:
+      - family-names: McHugh
+        given-names: Thomas
+    title: "Sustained natural attenuation of petroleum hydrocarbon plumes"
+    journal: "Groundwater Monitoring & Remediation"
+    volume: 43
+    issue: 4
+    start: 92
+    end: 103
+    year: 2023
+    notes: >-
+      TODO confirm the full author list and the exact title against the paper before
+      publication. The rate figures used in prior.py are computed from this paper's Data S1.
