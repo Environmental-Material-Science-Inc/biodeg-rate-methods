@@ -141,8 +141,14 @@ family our tensor-product P-spline belongs to.
 | 1, Mann-Kendall + Theil-Sen | 3.7 | apparent point decay | no |
 | 2, Domenico-normalized | 3.1 | flowpath lambda, dilution removed | by inference from a transport model |
 | 3, spatio-temporal P-spline | 3.7 | apparent centre decay | no |
+| 3, same surface, integrated | 3.7 | plume mass decay, -d ln M(t)/dt | no; spreading inside the footprint is removed, boundary export is not |
 
-All three are inversions of routine monitoring data. Every method that independently *proves*
+The mass estimand is the closest of the four to the mass-balance logic of the flux methods in
+3.3, but it is a mass balance over a footprint whose boundary we draw rather than across a
+measured control plane, so it inherits neither the flux methods' rigour nor their cost. Its
+measured bias and boundary sensitivity are recorded in `README.md`.
+
+All four are inversions of routine monitoring data. Every method that independently *proves*
 destruction (CSIA, push-pull, carbon-14, biomarkers) requires field or laboratory work we do not
 currently perform. If the binding regulatory question is whether a plume is degrading or merely
 spreading, CSIA is the strongest available answer and the clearest candidate for extending this

@@ -1,8 +1,8 @@
-"""Module 5 — collect the three estimates and prepare the modelling-startup handoff.
+"""Module 4 — collect the estimates and prepare the modelling-startup handoff.
 
-This module assembles the three method results into one ``SiteRateBundle`` and serializes a
+This module assembles the method results into one ``SiteRateBundle`` and serializes a
 handoff payload for the code that initializes the reactive-transport model. It enforces the
-rule that the three estimates are different quantities: they travel in SEPARATE slots, the
+rule that the estimates are different quantities: they travel in SEPARATE slots, the
 order-of-magnitude consistency check never averages them, and ``forbid_average`` exists so
 that any attempt to collapse them to a single number fails loudly.
 
@@ -13,7 +13,12 @@ its eyes open about what that estimand means:
   flowpath_lambda      mechanistic reaction coefficient with dilution removed; the closest to a
                        reaction rate, but parameter-sensitive (dispersivity)
   spline_centre_decay  smoothed concentration decline at the plume centre; includes dilution;
-                       the robust apparent-attenuation rate read off the spatio-temporal surface
+                       the apparent-attenuation rate read off the spatio-temporal surface
+  plume_mass_decay     -d ln M(t)/dt over the data-supported footprint, from the SAME surface;
+                       spatially integrated, so spreading inside the footprint does not register
+                       as decay, but boundary export and source dissolution still do. Carries a
+                       known additive bias (see method3_spline) that its credible interval does
+                       not cover.
 
 The selection is deliberately left null in the payload (``selected_for_initialization``); the
 handoff records the menu and the caveats, it does not make the modelling decision.
@@ -28,7 +33,7 @@ import numpy as np
 
 from .contract import (RateEstimate, SiteObservations, SiteRateBundle,
                         METHOD_MANN_KENDALL, METHOD_DOMENICO, METHOD_DOMENICO_2D,
-                        METHOD_ST_PSPLINE, METHOD_ESTIMAND, _jsonable)
+                        METHOD_ST_PSPLINE, METHOD_ST_PSPLINE_MASS, METHOD_ESTIMAND, _jsonable)
 from . import prior as _prior
 
 SCHEMA_VERSION = "biodeg_rates.handoff/1.1"
@@ -57,10 +62,10 @@ class CombineRefused(Exception):
 
 
 def forbid_average(*_args, **_kwargs):
-    """The three estimates are not interchangeable; there is no valid mean of them."""
+    """The estimates are not interchangeable; there is no valid mean of them."""
     raise CombineRefused(
-        "the three estimates are different physical quantities (point decay, flowpath lambda, "
-        "spline-centre decay) and must never be averaged or merged into one rate")
+        "the estimates are different physical quantities (point decay, flowpath lambda, "
+        "spline-centre decay, plume mass decay) and must never be averaged or merged into one rate")
 
 
 def assemble_bundle(site: SiteObservations,
@@ -68,12 +73,13 @@ def assemble_bundle(site: SiteObservations,
                     method1_summary: RateEstimate | None,
                     method2: RateEstimate | None,
                     method3: RateEstimate | None,
-                    method2_2d: RateEstimate | None = None) -> SiteRateBundle:
+                    method2_2d: RateEstimate | None = None,
+                    method3_mass: RateEstimate | None = None) -> SiteRateBundle:
     return SiteRateBundle(
         site_name=site.site_name, analyte=site.analyte,
         method1_per_well=list(method1_per_well or []),
         method1_summary=method1_summary, method2=method2, method2_2d=method2_2d,
-        method3=method3,
+        method3=method3, method3_mass=method3_mass,
     )
 
 
@@ -113,13 +119,17 @@ def build_handoff(site: SiteObservations, bundle: SiteRateBundle) -> dict:
     m2 = bundle.method2
     m2_2d = bundle.method2_2d
     m3 = bundle.method3
+    m3_mass = bundle.method3_mass
 
     # the "menu" the startup code chooses from: one entry per method, never combined
     menu = []
     for est, axis in ((m1, "per-well point decay (statistical, includes dilution)"),
                       (m2, "flowpath reaction coefficient, 1D centerline transect (dilution removed)"),
                       (m2_2d, "flowpath reaction coefficient, 2D fit with alpha_y fitted (dilution removed)"),
-                      (m3, "spline-centre concentration decay (smoothed, includes dilution)")):
+                      (m3, "spline-centre concentration decay (smoothed, includes dilution)"),
+                      (m3_mass, "plume mass-loss decay over the supported footprint (spatially "
+                                "integrated: spreading inside the footprint does not register as "
+                                "decay, but boundary export and source dissolution still do)")):
         if est is None:
             continue
         usable = bool(np.isfinite(est.value_per_year)) and est.confidence != "N/A"
@@ -178,7 +188,8 @@ def build_handoff(site: SiteObservations, bundle: SiteRateBundle) -> dict:
         "source_location_xy": list(site.source_xy),
         "source_max_concentration": _jsonable(site.source_conc),
 
-        # the estimates, kept strictly separate (two flowpath variants reported side by side)
+        # the estimates, kept strictly separate (two flowpath variants reported side by side; the
+        # two module-3 outputs are DIFFERENT estimands read off the same fitted surface)
         "estimates": {
             METHOD_MANN_KENDALL: {
                 "site_summary": _estimate_block(m1),
@@ -187,6 +198,7 @@ def build_handoff(site: SiteObservations, bundle: SiteRateBundle) -> dict:
             METHOD_DOMENICO: _estimate_block(m2),
             METHOD_DOMENICO_2D: _estimate_block(m2_2d),
             METHOD_ST_PSPLINE: _estimate_block(m3),
+            METHOD_ST_PSPLINE_MASS: _estimate_block(m3_mass),
         },
 
         # the menu and the cross-check; NO averaged value anywhere
@@ -212,7 +224,7 @@ def build_handoff(site: SiteObservations, bundle: SiteRateBundle) -> dict:
             "persistence and the largest predicted extent. modflow_input selects the smallest "
             "reliable reaction rate; if none is reliable, use the informed prior's LOWER bound "
             "(conservative_fallback_per_day), not a central value.",
-            "The three estimates are different physical quantities. Do not average or blend them.",
+            "The estimates are different physical quantities. Do not average or blend them.",
             "flowpath_lambda is the only mechanistic reaction rate (dilution removed); the other "
             "two are statistical bulk rates that include dilution.",
             "For a MODFLOW/MT3D/GWT transport model use ONLY the dilution-removed reaction rate "

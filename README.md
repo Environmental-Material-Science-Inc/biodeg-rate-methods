@@ -1,11 +1,11 @@
 # biodeg-rate-methods
 
 Three independent estimators of a bulk attenuation rate for a dissolved groundwater
-contaminant, plus a literature-prior combine and a model-handoff writer. The estimators are
-pure functions of a `SiteObservations` record, so the whole package runs and is tested
-without touching a file of field data.
+contaminant, producing four estimands, plus a literature-prior combine and a model-handoff
+writer. The estimators are pure functions of a `SiteObservations` record, so the whole package
+runs and is tested without touching a file of field data.
 
-The organising principle is that the three estimators **measure different quantities** by
+The organising principle is that the estimators **measure different quantities** by
 different methods on different data geometries. They are not three attempts at one number,
 they are not interchangeable, and the code refuses to average them: `contract.py` encodes the
 distinction in the types and `handoff.py` raises rather than aggregate across methods.
@@ -17,11 +17,11 @@ python -m venv .venv && .venv/bin/pip install -e ".[test]"
 python -m pytest tests/ -q
 ```
 
-55 tests, all of which run against a synthetic plume built in a temporary directory by
+66 tests, all of which run against a synthetic plume built in a temporary directory by
 `tests/conftest.py`. The fixture is separable by construction, a fixed Gaussian footprint
-times `exp(-K_TRUE * t)` with `K_TRUE = 0.15 / yr`, so the per-well point decay and the
-spline-centre decay both have the same known answer. On that fixture Method 1 returns
-0.157/yr and Method 3 returns 0.139/yr.
+times `exp(-K_TRUE * t)` with `K_TRUE = 0.15 / yr`, so the per-well point decay, the
+spline-centre decay and the plume mass decay all have the same known answer. On that fixture
+Method 1 returns 0.157/yr, the spline centre 0.139/yr and the plume mass 0.194/yr.
 
 To run the driver over a folder of sites:
 
@@ -34,13 +34,29 @@ gw_depths, gw_contaminants) and `site_data/level0_<site>.json` (thresholds, EPSG
 soil type). `dataio.py` is the only module that knows the spreadsheet layout; swapping in a
 different input format means replacing that one module.
 
-## The three estimands
+## Three methods, four estimands
 
 | Method | Module | Estimand | Dilution | Interpretation |
 |---|---|---|---|---|
 | 1 | `method1_mann_kendall.py` | `point_decay_k`, per well | included | Theil-Sen slope of ln C against time at one well, gated on a Mann-Kendall trend test. Rank based, so a shifting detection limit does not move the test statistic. Local and statistical. |
-| 2 | `method2_domenico.py` | `flowpath_lambda` | removed | First-order decay along the flowpath after analytically dividing out transverse spreading. The only one of the three with a mechanistic transport interpretation. 1D centreline (`estimate_site`) and 2D fit with `alpha_y` estimated (`estimate_site_2d`). |
+| 2 | `method2_domenico.py` | `flowpath_lambda` | removed | First-order decay along the flowpath after analytically dividing out transverse spreading. The only estimand here with a mechanistic transport interpretation. 1D centreline (`estimate_site`) and 2D fit with `alpha_y` estimated (`estimate_site_2d`). |
 | 3 | `method3_spline.py` | `spline_centre_decay` | included | Decay at the plume centre read off a REML-smoothed tensor-product P-spline surface in (easting, northing, time). Same estimand as Method 1, smoothed across all wells and events rather than read from one well. |
+| 3 | `method3_spline.py` | `plume_mass_decay` | partly | `-d ln M(t)/dt` from the **same** surface, where M(t) is the surface integrated over the data-supported footprint. Because it integrates over space, lateral spreading *inside* the footprint does not register as decay. Mass advected across the footprint boundary and continuing source dissolution still do, so it is not a reaction coefficient. |
+
+Method 3 returns both of its estimands from one surface fit via `estimate_site_both(site)`; use
+that rather than calling `estimate_site` and `estimate_site_mass` separately, which fits the REML
+surface twice. The two numbers are different quantities and are never averaged.
+
+**Measured bias in `plume_mass_decay`.** On separable synthetic plumes, where ln M(t) is exactly
+linear and the answer is known, the mass rate runs high by a near-constant **+0.009/yr**,
+independent of the true rate: +2.3% at k = 0.40/yr, +6.2% at 0.15/yr, +18.7% at 0.05/yr. The
+credible interval does not cover that offset. On the censored site fixture (14 wells, 21%
+non-detects) the error reaches +30%, and it falls to +8% when the support radius is tightened,
+so on real networks the footprint boundary carries part of the rate. Every estimate therefore
+reports a `support_radius_sweep` across support factors 1, 2, 3 and the full hull, and flags
+`boundary_sensitive` when the spread exceeds a quarter of the estimate. Treat the sweep, not the
+credible interval, as the honest uncertainty on this number. `tests/test_method3.py` pins the
+bias so a change in it fails the suite rather than passing silently.
 
 `prior.py` carries the literature prior. For benzene it is the McHugh et al. (2023) median
 first-order attenuation rate, 0.14/yr across 1,905 California GeoTracker petroleum sites, with
@@ -68,7 +84,10 @@ that does not apply returns an `N/A` estimate rather than raising. Method 2 flag
 implausibly fast or poorly constrained. Method 3 drops to low confidence when its credible band
 crosses zero, and it guards against surface ballooning at the plume centre when the monitoring
 network changes over time, using a robust slope, a sign check against the raw mean-concentration
-trend, and an OLS-versus-robust agreement test.
+trend, and an OLS-versus-robust agreement test. The mass estimand carries those same three
+guards plus the support mask that keeps the integral on data-supported ground, reports the
+wells-per-event range that drives ballooning in the first place, and states its measured bias
+in its own `notes` field rather than leaving a reader to find it here.
 
 ## Validation harnesses
 

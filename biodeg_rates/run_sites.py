@@ -1,7 +1,7 @@
 """Driver: run the three estimators on a folder of sites.
 
-For each site it loads the observations, runs Methods 1-3 (kept separate), and writes the
-handoff JSON, then prints a one-line summary.
+For each site it loads the observations, runs Methods 1-3 (kept separate; Method 3 reports both
+its estimands from one surface fit), and writes the handoff JSON, then prints a one-line summary.
 
 Usage:
   python -m biodeg_rates.run_sites --root "<site folder>" --out outputs/biodeg_rates
@@ -29,13 +29,14 @@ def run_site(site_dir: str, out_root: str, analyte: str = "benzene") -> dict:
     per_well, summary = m1.estimate_site(site)
     est2 = m2.estimate_site(site, soil_type=soil)
     est2_2d = m2.estimate_site_2d(site, soil_type=soil)
-    est3 = m3.estimate_site(site)
-    bundle = handoff.assemble_bundle(site, per_well, summary, est2, est3, method2_2d=est2_2d)
+    est3, est3_mass = m3.estimate_site_both(site)      # one surface fit, two estimands
+    bundle = handoff.assemble_bundle(site, per_well, summary, est2, est3,
+                                     method2_2d=est2_2d, method3_mass=est3_mass)
 
     out_dir = os.path.join(out_root, (site.site_id or site.site_name).replace(" ", "_").replace("/", "_"))
     hpath = handoff.write_handoff(site, bundle, out_dir)
     return dict(site=site.site_name, summary=summary, m2=est2, m2_2d=est2_2d, m3=est3,
-                bundle=bundle, handoff=hpath)
+                m3_mass=est3_mass, bundle=bundle, handoff=hpath)
 
 
 def _fmt(est):
@@ -54,8 +55,9 @@ def main():
 
     sites = ([a.site] if a.site else
              sorted(d for d in os.listdir(a.root) if os.path.isdir(os.path.join(a.root, d))))
-    print(f"{'site':24s} {'M1 k':>8s} {'M2 lam':>8s} {'M2-2D':>8s} {'M3 ctr':>8s}  consistency")
-    print("-" * 86)
+    print(f"{'site':24s} {'M1 k':>8s} {'M2 lam':>8s} {'M2-2D':>8s} {'M3 ctr':>8s} {'M3 mass':>8s}"
+          f"  consistency")
+    print("-" * 95)
     for s in sites:
         sd = os.path.join(a.root, s)
         try:
@@ -71,7 +73,7 @@ def main():
         spread = cc.get("spread_orders_of_magnitude")
         flag = "" if spread is None else (f"{spread} oom " + ("OK" if cc["agree_within_1_oom"] else "DISAGREE"))
         print(f"{r['site']:24s} {_fmt(r['summary'])} {_fmt(r['m2'])} {_fmt(r['m2_2d'])} "
-              f"{_fmt(r['m3'])}  {flag}")
+              f"{_fmt(r['m3'])} {_fmt(r['m3_mass'])}  {flag}")
     print(f"\noutputs under: {os.path.abspath(a.out)}")
 
 

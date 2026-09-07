@@ -116,17 +116,20 @@ def _est(method, estd, val):
 
 
 def test_build_handoff_keeps_three_separate(synth_site):
-    from biodeg_rates.contract import (METHOD_MANN_KENDALL, METHOD_ST_PSPLINE)
+    from biodeg_rates.contract import (METHOD_MANN_KENDALL, METHOD_ST_PSPLINE,
+                                       METHOD_ST_PSPLINE_MASS)
     m1 = _est(METHOD_MANN_KENDALL, Estimand.POINT_DECAY, 0.15)
     m2 = _est(METHOD_DOMENICO, Estimand.FLOWPATH_LAMBDA, 0.10)
     m3 = _est(METHOD_ST_PSPLINE, Estimand.SPLINE_CENTRE_DECAY, 0.18)
     bundle = handoff.assemble_bundle(synth_site, [m1], m1, m2, m3)
     payload = handoff.build_handoff(synth_site, bundle)
 
-    # estimates live in separate slots (incl. the 2D flowpath variant key, value may be None here)
+    # every estimand has its own slot, present even when the estimate is None (the 2D flowpath
+    # variant and the module-3 mass rate are both unset in this bundle)
     from biodeg_rates.contract import METHOD_DOMENICO_2D
     assert {METHOD_MANN_KENDALL, METHOD_DOMENICO, METHOD_DOMENICO_2D,
-            METHOD_ST_PSPLINE} == set(payload["estimates"])
+            METHOD_ST_PSPLINE, METHOD_ST_PSPLINE_MASS} == set(payload["estimates"])
+    assert payload["estimates"][METHOD_ST_PSPLINE_MASS] is None
     # the menu has one row per non-None method, and nothing pre-selected (the modeller chooses)
     assert len(payload["initialization_menu"]) == 3
     assert payload["selected_for_initialization"] is None
@@ -168,3 +171,39 @@ def test_write_handoff_roundtrips(tmp_path, synth_site):
     # the N/A Domenico estimate is carried as not usable, not dropped or averaged away
     dom = loaded["estimates"][METHOD_DOMENICO]
     assert dom["confidence"] == "N/A"
+
+
+def test_handoff_carries_the_mass_rate_as_its_own_estimand(synth_site):
+    """The two module-3 outputs are different quantities and must not collapse into one slot."""
+    from biodeg_rates.contract import (METHOD_MANN_KENDALL, METHOD_ST_PSPLINE,
+                                       METHOD_ST_PSPLINE_MASS)
+    m1 = _est(METHOD_MANN_KENDALL, Estimand.POINT_DECAY, 0.15)
+    m3 = _est(METHOD_ST_PSPLINE, Estimand.SPLINE_CENTRE_DECAY, 0.18)
+    m3m = _est(METHOD_ST_PSPLINE_MASS, Estimand.PLUME_MASS_DECAY, 0.22)
+    bundle = handoff.assemble_bundle(synth_site, [m1], m1, None, m3, method3_mass=m3m)
+    payload = handoff.build_handoff(synth_site, bundle)
+
+    block = payload["estimates"][METHOD_ST_PSPLINE_MASS]
+    assert block["estimand"] == "plume_mass_decay"
+    assert block["value_per_year"] == 0.22
+    assert abs(block["value_per_day"] - 0.22 / 365.0) < 1e-9      # MODFLOW units carried
+    assert block["removes_dilution"] is False                     # not a reaction coefficient
+
+    rows = {m["method"]: m for m in payload["initialization_menu"]}
+    assert METHOD_ST_PSPLINE in rows and METHOD_ST_PSPLINE_MASS in rows
+    assert rows[METHOD_ST_PSPLINE]["estimand"] != rows[METHOD_ST_PSPLINE_MASS]["estimand"]
+    # both module-3 estimands reach the consistency check as separate numbers
+    assert METHOD_ST_PSPLINE_MASS in bundle.representative_rates()
+
+
+def test_mass_rate_is_never_offered_as_the_mechanistic_modflow_seed(synth_site):
+    """k_mass removes spreading inside the footprint but not boundary export or source
+    dissolution, so it must not be picked up by the dilution-removed seed selection."""
+    from biodeg_rates.contract import METHOD_MANN_KENDALL, METHOD_ST_PSPLINE_MASS
+    m1 = _est(METHOD_MANN_KENDALL, Estimand.POINT_DECAY, 0.15)
+    m3m = _est(METHOD_ST_PSPLINE_MASS, Estimand.PLUME_MASS_DECAY, 0.22)
+    bundle = handoff.assemble_bundle(synth_site, [m1], m1, None, None, method3_mass=m3m)
+    payload = handoff.build_handoff(synth_site, bundle)
+    mf = payload["modflow_input"]
+    assert not mf.get("ready_for_modflow"), "a non-mechanistic rate must not arm the MODFLOW seed"
+    assert mf.get("decay_per_day") in (None, 0.0) or "conservative_fallback_per_day" in mf

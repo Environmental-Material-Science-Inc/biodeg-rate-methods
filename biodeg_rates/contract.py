@@ -31,6 +31,8 @@ class Estimand(str, Enum):
     FLOWPATH_LAMBDA = "flowpath_lambda"    # module 2: along-flow reaction coefficient, mechanistic
     SPLINE_CENTRE_DECAY = "spline_centre_decay"  # module 3: concentration decay at the plume centre
                                            # read from the spatio-temporal P-spline surface (-df/dt)
+    PLUME_MASS_DECAY = "plume_mass_decay"  # module 3: -d ln M(t)/dt, where M(t) is the surface
+                                           # integrated over the data-supported plume footprint
 
 
 # Human-readable method identifiers (stable; used as dict keys in the handoff JSON).
@@ -38,6 +40,7 @@ METHOD_MANN_KENDALL = "mann_kendall_theil_sen"
 METHOD_DOMENICO = "domenico_normalized"          # the 1D centerline-transect variant
 METHOD_DOMENICO_2D = "domenico_2d_fit"           # the 2D fit (all wells; alpha_y fitted)
 METHOD_ST_PSPLINE = "st_pspline_centre_decay"    # spline-centre concentration decay (module 3)
+METHOD_ST_PSPLINE_MASS = "st_pspline_mass_decay"  # plume mass-loss decay (module 3, same surface)
 
 # Which Estimand each method produces, and whether it removes physical dilution.
 METHOD_ESTIMAND = {
@@ -45,12 +48,20 @@ METHOD_ESTIMAND = {
     METHOD_DOMENICO: Estimand.FLOWPATH_LAMBDA,
     METHOD_DOMENICO_2D: Estimand.FLOWPATH_LAMBDA,
     METHOD_ST_PSPLINE: Estimand.SPLINE_CENTRE_DECAY,
+    METHOD_ST_PSPLINE_MASS: Estimand.PLUME_MASS_DECAY,
 }
+# NOTE on the mass estimand: integrating the surface removes the concentration decline caused by
+# lateral SPREADING inside the monitored footprint (spreading moves mass, it does not destroy it),
+# so k_mass is less confounded than a point concentration rate. It is still NOT a dilution-removed
+# reaction coefficient in the Method 2 sense, because mass advected out across the footprint
+# boundary also reduces M(t), and continuing source dissolution adds to it. It is therefore
+# recorded as removes_dilution=False, which keeps it out of the mechanistic MODFLOW seed selection.
 METHOD_REMOVES_DILUTION = {
     METHOD_MANN_KENDALL: False,
     METHOD_DOMENICO: True,
     METHOD_DOMENICO_2D: True,
     METHOD_ST_PSPLINE: False,
+    METHOD_ST_PSPLINE_MASS: False,
 }
 
 
@@ -160,10 +171,14 @@ class SiteObservations:
 
 @dataclass
 class SiteRateBundle:
-    """The three method results for one site, kept strictly separate.
+    """The method results for one site, kept strictly separate.
 
-    There is deliberately NO method that returns a single merged rate. The three live in
-    their own slots. ``consistency_check`` compares their orders of magnitude (a diagnostic
+    Three methods produce four ESTIMANDS: module 3 reports both a concentration decay at the
+    plume centre and a plume mass-loss decay from the same fitted surface, and those two are
+    different physical quantities.
+
+    There is deliberately NO method that returns a single merged rate. Each estimate lives in
+    its own slot. ``consistency_check`` compares their orders of magnitude (a diagnostic
     the reference doc recommends) but never averages them.
     """
 
@@ -173,13 +188,14 @@ class SiteRateBundle:
     method1_summary: RateEstimate | None = None     # robust per-well summary (NOT a cross-method avg)
     method2: RateEstimate | None = None             # module 2, 1D centerline transect (site lambda)
     method2_2d: RateEstimate | None = None          # module 2, 2D fit (site lambda; alpha_y fitted)
-    method3: RateEstimate | None = None             # module 3 (spline-centre concentration decay)
+    method3: RateEstimate | None = None             # module 3, spline-centre concentration decay
+    method3_mass: RateEstimate | None = None        # module 3, plume mass-loss decay (same surface)
 
     def representative_rates(self) -> dict:
         """One representative value per ESTIMAND for the order-of-magnitude check. The two
         flowpath methods (1D, 2D) share an estimand, so a single flowpath value is used (the 2D
-        fit when usable, else the 1D). These are separate numbers compared side by side, never
-        combined."""
+        fit when usable, else the 1D). The two module-3 outputs do NOT share an estimand, so both
+        appear. These are separate numbers compared side by side, never combined."""
         def _reliable(e):
             return (e is not None and np.isfinite(e.value_per_year)
                     and not e.diagnostics.get("poorly_constrained")
@@ -200,10 +216,12 @@ class SiteRateBundle:
             out[METHOD_DOMENICO] = flow
         if self.method3 is not None:
             out[METHOD_ST_PSPLINE] = self.method3.value_per_year
+        if self.method3_mass is not None:
+            out[METHOD_ST_PSPLINE_MASS] = self.method3_mass.value_per_year
         return out
 
     def consistency_check(self) -> dict:
-        """Order-of-magnitude agreement across the three representative rates. Large spread
+        """Order-of-magnitude agreement across the representative rates. Large spread
         is diagnostic (non-steady state, dilution masquerading as decay, or dispersivity
         misspecification), not a reason to pick a middle value."""
         vals = {k: v for k, v in self.representative_rates().items()

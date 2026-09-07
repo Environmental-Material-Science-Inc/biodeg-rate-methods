@@ -39,7 +39,7 @@ from scipy.spatial import ConvexHull, QhullError
 from matplotlib.path import Path as MplPath
 
 from .contract import (RateEstimate, SiteObservations,
-                       METHOD_ST_PSPLINE, METHOD_ESTIMAND)
+                       METHOD_ST_PSPLINE, METHOD_ST_PSPLINE_MASS, METHOD_ESTIMAND)
 
 MIN_WELLS = 6
 MIN_TIMES = 4
@@ -259,19 +259,59 @@ def _support_mask(gpts, well_xy, factor):
     return dist <= r, r
 
 
+def mass_series_bases(fit: SplineFit, gpts: np.ndarray, times: np.ndarray):
+    """Precompute the (spatial, temporal) bases ``mass_log_series`` needs, so a loop of posterior
+    draws over the same grid and times does not rebuild them on every draw."""
+    return fit.spatial_basis(gpts[:, 0], gpts[:, 1]), fit.temporal_basis(times)
+
+
 def mass_log_series(fit: SplineFit, gpts: np.ndarray, times: np.ndarray,
-                    theta_vec: np.ndarray | None = None) -> np.ndarray:
-    """ln M(t) over the supplied grid points for each time. phi*R*b cancels in k_M, so this is
-    the relative plume mass. ``theta_vec`` overrides the fitted coefficients (posterior draws)."""
+                    theta_vec: np.ndarray | None = None, bases=None) -> np.ndarray:
+    """ln M(t) over the supplied grid points for each time. phi*R*b and the constant cell area
+    cancel in the slope, so this is the relative plume mass. ``theta_vec`` overrides the fitted
+    coefficients (posterior draws); ``bases`` accepts the output of ``mass_series_bases``."""
     theta = fit.theta if theta_vec is None else theta_vec
     Theta = theta.reshape(fit.K1 * fit.K2, fit.K3)
-    Sgrid = fit.spatial_basis(gpts[:, 0], gpts[:, 1])
-    tb_mat = fit.temporal_basis(times)
+    Sgrid, tb_mat = bases if bases is not None else mass_series_bases(fit, gpts, times)
     out = []
     for bt in tb_mat:
         fgrid = Sgrid @ (Theta @ bt)
-        out.append(math.log(float(np.sum(np.exp(fgrid)))))
+        # exp of a ballooned surface can overflow; log-sum-exp keeps ln M(t) finite so the caller
+        # sees a usable number (or a flagged one) rather than an inf that silently poisons a slope.
+        mx = float(np.max(fgrid))
+        out.append(mx + math.log(float(np.sum(np.exp(fgrid - mx)))))
     return np.array(out)
+
+
+def mass_grid(E, N, cfg: SplineConfig = SplineConfig()):
+    """Quadrature points for the mass integral: a ``cfg.grid_n`` square grid clipped to the convex
+    hull of the wells, then (unless ``mask_support_factor`` is None) restricted to points within
+    ``mask_support_factor`` nearest-neighbour well spacings of a well.
+
+    The support restriction is the primary ballooning defence for this estimand (reference 3.9):
+    the smoother is unconstrained in the corners of the hull where no well has ever been sampled,
+    and an integral taken over those corners can rise while every measured concentration falls.
+
+    Returns (gpts, info) where info records what the mask removed.
+    """
+    E = np.asarray(E, float); N = np.asarray(N, float)
+    grid, hull_area = _hull(E, N)
+    gx = np.linspace(E.min(), E.max(), cfg.grid_n)
+    gy = np.linspace(N.min(), N.max(), cfg.grid_n)
+    GX, GY = np.meshgrid(gx, gy)
+    pts = np.column_stack([GX.ravel(), GY.ravel()])
+    gpts = pts[grid.contains_points(pts)]
+    n_hull = int(gpts.shape[0])
+    r_support = None
+    if cfg.mask_support_factor is not None and n_hull:
+        mask, r_support = _support_mask(gpts, np.column_stack([E, N]), cfg.mask_support_factor)
+        gpts = gpts[mask]
+    info = dict(n_grid_hull=n_hull, n_grid_supported=int(gpts.shape[0]),
+                support_radius_m=(round(float(r_support), 1) if r_support is not None
+                                  and np.isfinite(r_support) else None),
+                hull_area_m2=round(float(hull_area), 1),
+                mask_support_factor=cfg.mask_support_factor)
+    return gpts, info
 
 
 def concentration_decay_at(fit: SplineFit, points: dict, times) -> dict:
@@ -314,11 +354,27 @@ def _plume_axis_points(site: SiteObservations) -> dict:
             "edge": (cx + 0.9 * L * axis[0], cy + 0.9 * L * axis[1])}
 
 
-def estimate_site(site: SiteObservations, cfg: SplineConfig = SplineConfig()) -> RateEstimate:
-    scope = "site"
+@dataclass(frozen=True)
+class _Prepared:
+    """One fitted surface plus the arrays both module-3 estimands read from it."""
+    fit: SplineFit
+    f: "object"                 # the observation frame (pandas)
+    E: np.ndarray
+    N: np.ndarray
+    times: np.ndarray
+    eval_times: np.ndarray
+    n_wells: int
+
+
+def _prepare(site: SiteObservations, cfg: SplineConfig):
+    """Shared preamble: substitute non-detects, check coverage, fit the surface ONCE.
+
+    Both module-3 estimands read the same surface, so this exists to keep a caller that wants
+    both from paying for two REML fits. Returns (_Prepared, None) or (None, reason).
+    """
     f = site.frame.copy()
     if len(f) == 0:
-        return RateEstimate.not_applicable(METHOD_ST_PSPLINE, scope, "no observations")
+        return None, "no observations"
 
     val = f.conc.to_numpy(float).copy()
     det = f.detect.to_numpy(bool)
@@ -331,13 +387,67 @@ def estimate_site(site: SiteObservations, cfg: SplineConfig = SplineConfig()) ->
     n_wells = f.well_id.nunique()
     times = np.unique(np.round(T, 6))
     if n_wells < MIN_WELLS or len(times) < MIN_TIMES or len(f) < MIN_OBS:
-        return RateEstimate.not_applicable(
-            METHOD_ST_PSPLINE, scope,
-            f"insufficient spatio-temporal coverage (wells={n_wells}, times={len(times)}, "
-            f"obs={len(f)}; need {MIN_WELLS}/{MIN_TIMES}/{MIN_OBS})")
+        return None, (f"insufficient spatio-temporal coverage (wells={n_wells}, "
+                      f"times={len(times)}, obs={len(f)}; need "
+                      f"{MIN_WELLS}/{MIN_TIMES}/{MIN_OBS})")
 
     fit = fit_surface(E, N, T, y, cfg)
-    eval_times = times.copy()
+    return _Prepared(fit=fit, f=f, E=E, N=N, times=times, eval_times=times.copy(),
+                     n_wells=int(n_wells)), None
+
+
+def _data_proxy_rate(f) -> float:
+    """Raw mean-concentration trend over detected observations (1/yr), the data anchor that both
+    module-3 estimands are sign-checked against. Nothing smoothed enters this number."""
+    det = f[f.detect]
+    prox = det.groupby(det.t_years.round(3)).conc.mean()
+    if len(prox) < 3:
+        return float("nan")
+    return -_theil_sen_slope(prox.index.to_numpy(float), np.log(prox.to_numpy(float)))
+
+
+def _wells_per_time(f) -> tuple[int, int]:
+    """Smallest and largest number of wells sampled in any one event. A network that grows or
+    shrinks over the record is the documented cause of surface ballooning (3.9), and it hits the
+    mass integral harder than a point rate, so both estimands report it."""
+    g = f.groupby(f.t_years.round(3)).well_id.nunique()
+    return (int(g.min()), int(g.max())) if len(g) else (0, 0)
+
+
+def _posterior_draws(fit: SplineFit, cfg: SplineConfig, statistic) -> np.ndarray:
+    """Sample theta ~ N(theta_hat, sigma2 Mmat^-1) and apply ``statistic`` to each draw.
+    Non-finite draws are dropped rather than allowed to poison a percentile."""
+    from scipy.linalg import solve_triangular
+    rng = np.random.default_rng(cfg.seed)
+    out = []
+    try:
+        R = np.linalg.cholesky(fit.Mmat).T
+        s = math.sqrt(max(fit.sigma2, 0.0))
+        for _ in range(cfg.n_posterior_draws):
+            td = fit.theta + s * solve_triangular(
+                R, rng.standard_normal(fit.theta.shape[0]), lower=False)
+            v = statistic(td)
+            if np.isfinite(v):
+                out.append(float(v))
+    except (np.linalg.LinAlgError, ValueError):
+        pass
+    return np.array(out)
+
+
+def estimate_site(site: SiteObservations, cfg: SplineConfig = SplineConfig()) -> RateEstimate:
+    """Module 3, estimand 1: the concentration decay at the plume centre (k_centre)."""
+    prep, reason = _prepare(site, cfg)
+    if prep is None:
+        return RateEstimate.not_applicable(METHOD_ST_PSPLINE, "site", reason)
+    return _centre_estimate(site, prep, cfg)
+
+
+def _centre_estimate(site: SiteObservations, prep: _Prepared,
+                     cfg: SplineConfig) -> RateEstimate:
+    scope = "site"
+    fit, f, times = prep.fit, prep.f, prep.times
+    n_wells = prep.n_wells
+    eval_times = prep.eval_times
     tlo, thi = float(eval_times.min()), float(eval_times.max())
 
     # spline-CENTRE concentration decay: k = -slope of ln C at the plume centre over time (years,
@@ -350,33 +460,20 @@ def estimate_site(site: SiteObservations, cfg: SplineConfig = SplineConfig()) ->
     slope_ols = float(np.polyfit(eval_times, lnC_centre, 1)[0])
 
     # credible band on k_centre from posterior draws: theta ~ N(theta_hat, sigma2 Mmat^-1)
-    from scipy.linalg import solve_triangular
     Sb_c = fit.spatial_basis([cx], [cy]); Tb = fit.temporal_basis(eval_times)
 
     def _centre_lnC(theta_vec):
         Theta = theta_vec.reshape(fit.K1 * fit.K2, fit.K3)
         return (Sb_c @ Theta @ Tb.T).ravel()
 
-    rng = np.random.default_rng(cfg.seed)
-    kc_draws = []
-    try:
-        R = np.linalg.cholesky(fit.Mmat).T
-        s = math.sqrt(max(fit.sigma2, 0.0))
-        for _ in range(cfg.n_posterior_draws):
-            td = fit.theta + s * solve_triangular(R, rng.standard_normal(fit.theta.shape[0]), lower=False)
-            kc_draws.append(-_theil_sen_slope(eval_times, _centre_lnC(td)))
-    except (np.linalg.LinAlgError, ValueError):
-        pass
-    kc_draws = np.array(kc_draws)
+    kc_draws = _posterior_draws(fit, cfg,
+                                lambda td: -_theil_sen_slope(eval_times, _centre_lnC(td)))
     ci_lo = float(np.percentile(kc_draws, 5)) if kc_draws.size else float("nan")
     ci_hi = float(np.percentile(kc_draws, 95)) if kc_draws.size else float("nan")
 
     # data-anchored ballooning check: the smoothed centre decay must agree in SIGN with the raw
     # mean-concentration trend; a time-varying network can let the surface balloon at the centre.
-    det = f[f.detect]
-    prox = det.groupby(det.t_years.round(3)).conc.mean()
-    k_data = (-_theil_sen_slope(prox.index.to_numpy(float), np.log(prox.to_numpy(float)))
-              if len(prox) >= 3 else float("nan"))
+    k_data = _data_proxy_rate(f)
     data_conflict = bool(np.isfinite(k_data) and k_centre * k_data < 0
                          and abs(k_centre) > 0.05 and abs(k_data) > 0.05)
     ballooning = bool(data_conflict
@@ -433,3 +530,177 @@ def estimate_site(site: SiteObservations, cfg: SplineConfig = SplineConfig()) ->
         half_life_years=RateEstimate.half_life(k_centre), n=int(len(f)), trend=trend,
         confidence=conf, removes_dilution=False, diagnostics=diagnostics, notes=notes,
     )
+
+
+MIN_SUPPORTED_GRID = 25     # quadrature points needed before a mass integral means anything
+
+
+def estimate_site_mass(site: SiteObservations, cfg: SplineConfig = SplineConfig()) -> RateEstimate:
+    """Module 3, estimand 2: the plume MASS-loss decay (k_mass).
+
+    k_mass = -d ln M(t) / dt, where M(t) is the fitted concentration surface integrated over the
+    data-supported plume footprint at time t. Because the integral is taken over space, lateral
+    spreading inside the footprint does not by itself lower M(t): spreading moves mass, it does
+    not destroy it. That makes k_mass less confounded than the point rate k_centre, and it is the
+    reason a spatially integrated rate is the more informative of the two when the network
+    supports it.
+
+    It is still NOT a dilution-removed reaction coefficient (Method 2). Mass advected out across
+    the footprint boundary also lowers M(t), and continuing source dissolution raises it, so
+    ``removes_dilution`` is False and the handoff does not offer k_mass as the mechanistic
+    MODFLOW seed.
+    """
+    prep, reason = _prepare(site, cfg)
+    if prep is None:
+        return RateEstimate.not_applicable(METHOD_ST_PSPLINE_MASS, "site", reason)
+    return _mass_estimate(site, prep, cfg)
+
+
+def _mass_estimate(site: SiteObservations, prep: _Prepared, cfg: SplineConfig) -> RateEstimate:
+    scope = "site"
+    fit, f, times = prep.fit, prep.f, prep.times
+    n_wells = prep.n_wells
+    eval_times = prep.eval_times
+    tlo, thi = float(eval_times.min()), float(eval_times.max())
+
+    gpts, ginfo = mass_grid(prep.E, prep.N, cfg)
+    if gpts.shape[0] < MIN_SUPPORTED_GRID:
+        return RateEstimate.not_applicable(
+            METHOD_ST_PSPLINE_MASS, scope,
+            f"too few data-supported quadrature points for a mass integral "
+            f"({gpts.shape[0]} of {ginfo['n_grid_hull']} in-hull points survive the support "
+            f"mask; need {MIN_SUPPORTED_GRID})")
+
+    bases = mass_series_bases(fit, gpts, eval_times)
+    lnM = mass_log_series(fit, gpts, eval_times, bases=bases)
+    if not np.all(np.isfinite(lnM)):
+        return RateEstimate.not_applicable(
+            METHOD_ST_PSPLINE_MASS, scope, "ln M(t) is not finite over the fitted surface")
+
+    slope_ols = float(np.polyfit(eval_times, lnM, 1)[0])
+    slope_robust = _theil_sen_slope(eval_times, lnM)
+    k_mass = -(slope_robust if cfg.robust_slope else slope_ols)
+
+    kM_draws = _posterior_draws(
+        fit, cfg,
+        lambda td: -_theil_sen_slope(
+            eval_times, mass_log_series(fit, gpts, eval_times, theta_vec=td, bases=bases)))
+    ci_lo = float(np.percentile(kM_draws, 5)) if kM_draws.size else float("nan")
+    ci_hi = float(np.percentile(kM_draws, 95)) if kM_draws.size else float("nan")
+
+    # ballooning defences, in the same order as the centre estimand (reference 3.9). The mass
+    # integral is the quantity ballooning was first observed on, so the support mask above is the
+    # first defence, the robust slope is the second, and these two checks are the third.
+    k_data = _data_proxy_rate(f)
+    data_conflict = bool(np.isfinite(k_data) and k_mass * k_data < 0
+                         and abs(k_mass) > 0.05 and abs(k_data) > 0.05)
+    ballooning = bool(data_conflict
+                      or abs(slope_ols - (-k_mass)) > 0.3 * max(abs(k_mass), 0.05))
+
+    w_min, w_max = _wells_per_time(f)
+    network_drift = bool(w_max > 0 and (w_max - w_min) / w_max > 0.5)
+
+    # Support-radius sweep, the analogue of Method 2's dispersivity sweep: k_mass depends on where
+    # the footprint boundary is drawn, and on a real network that dependence can be large. Report
+    # it rather than choosing a radius and hiding the choice. No refit is needed, only re-integration.
+    sweep = {}
+    for fac in (1.0, 2.0, 3.0, None):
+        g2, i2 = mass_grid(prep.E, prep.N, SplineConfig(**{**cfg.__dict__,
+                                                          "mask_support_factor": fac}))
+        if g2.shape[0] < MIN_SUPPORTED_GRID:
+            continue
+        lnM2 = mass_log_series(fit, g2, eval_times)
+        if not np.all(np.isfinite(lnM2)):
+            continue
+        sweep[("full_hull" if fac is None else f"factor_{fac:g}")] = dict(
+            n_grid=int(g2.shape[0]),
+            k_mass_per_year=round(-_theil_sen_slope(eval_times, lnM2), 5))
+    sweep_vals = [v["k_mass_per_year"] for v in sweep.values()
+                  if v["k_mass_per_year"] is not None and np.isfinite(v["k_mass_per_year"])]
+    sweep_spread = (round(max(sweep_vals) - min(sweep_vals), 5) if len(sweep_vals) > 1 else None)
+    boundary_sensitive = bool(sweep_spread is not None and np.isfinite(k_mass)
+                              and abs(k_mass) > 0
+                              and sweep_spread > 0.25 * abs(k_mass))
+
+    trend = "decreasing" if k_mass > 0 else "increasing"
+    ci_excludes_zero = bool(kM_draws.size and np.isfinite(ci_lo) and np.isfinite(ci_hi)
+                            and ci_lo * ci_hi > 0)
+    conf = ("high" if (n_wells >= 12 and len(times) >= 8 and ci_excludes_zero and ci_lo > 0)
+            else "medium" if (n_wells >= 8 and len(times) >= 6 and ci_excludes_zero) else "low")
+    if ballooning and conf != "low":
+        conf = "low"
+    if cfg.mask_support_factor is None and conf == "high":
+        conf = "medium"     # integrating the full hull is the ungirded configuration
+
+    notes = ("plume mass-loss decay: -slope of ln M(t), the REML-smoothed surface integrated over "
+             "the data-supported footprint. Spatially integrated, so lateral spreading inside the "
+             "footprint does not register as decay; mass advected across the footprint boundary "
+             "and continuing source dissolution still do, so this is NOT a dilution-removed "
+             "reaction coefficient. Robust Theil-Sen slope over years; non-detects at RL/2.")
+    if fit.reml_vs_gcv_gap > 4:
+        notes += (" REML and GCV smoothing differ; possible unmodeled spatio-temporal correlation "
+                  "(B.7), interpret with care.")
+    if data_conflict:
+        notes += (f" BALLOONING: mass decay ({k_mass:.2f}/yr) disagrees in sign with the raw "
+                  f"mean-concentration trend ({k_data:.2f}/yr); engineer review.")
+    if network_drift:
+        notes += (f" Monitoring network changes over the record ({w_min} to {w_max} wells per "
+                  f"event); a spatial integral is sensitive to that, interpret with care.")
+    if boundary_sensitive:
+        notes += (f" BOUNDARY SENSITIVE: k_mass moves by {sweep_spread:.3f}/yr across support "
+                  f"radii (see support_radius_sweep), more than a quarter of the estimate; the "
+                  f"footprint boundary, not the data, is carrying the rate.")
+    if not ci_excludes_zero:
+        notes += " Credible interval crosses zero: decay not distinguishable from no change."
+    notes += (" Known bias: on separable synthetic plumes with a known rate this estimator runs "
+              "about +0.009/yr high regardless of the true rate, which is under 3% at 0.4/yr but "
+              "close to 20% at 0.05/yr. The credible interval does not cover that offset.")
+
+    DPY = 365.0     # MODFLOW day/year convention; value_per_year is 1/yr, also reported in 1/day
+    diagnostics = dict(
+        n_wells=int(n_wells), n_times=int(len(times)), n_obs=int(len(f)),
+        bases=f"{fit.K1}x{fit.K2}x{fit.K3}", edf=round(fit.edf, 2),
+        lambda_space_E=round(float(fit.lam[0]), 4), lambda_space_N=round(float(fit.lam[1]), 4),
+        lambda_time=round(float(fit.lam[2]), 4), sigma2=round(fit.sigma2, 4),
+        reml_vs_gcv_loglambda_gap=round(fit.reml_vs_gcv_gap, 2),
+        mass_rate_per_year=round(k_mass, 5), mass_rate_per_day=round(k_mass / DPY, 8),
+        ballooning_suspected=ballooning, data_conflict=data_conflict,
+        k_data_proxy_per_yr=(round(float(k_data), 4) if np.isfinite(k_data) else None),
+        ols_slope_per_yr=round(slope_ols, 5),
+        robust_slope_per_yr=(round(float(slope_robust), 5)
+                             if np.isfinite(slope_robust) else None),
+        slope_estimator=("theil_sen" if cfg.robust_slope else "ols"),
+        wells_per_event_min=w_min, wells_per_event_max=w_max, network_drift=network_drift,
+        support_radius_sweep=sweep, sweep_spread_per_year=sweep_spread,
+        boundary_sensitive=boundary_sensitive,
+        known_additive_bias_per_year=0.009,
+        time_span_years=round(thi - tlo, 2), nd_substitution="RL/2",
+        **ginfo,
+        qaqc=dict(
+            eval_times_years=[round(float(t), 3) for t in eval_times.tolist()],
+            lnM=[round(float(v), 4) for v in lnM.tolist()],
+            fit_slope=round(-k_mass, 5),
+            fit_intercept=round(float(np.median(lnM) + k_mass * np.median(eval_times)), 4),
+            k_draws_per_year=[round(float(v), 5) for v in kM_draws[:200].tolist()],
+        ),
+    )
+    return RateEstimate(
+        method=METHOD_ST_PSPLINE_MASS, estimand=METHOD_ESTIMAND[METHOD_ST_PSPLINE_MASS],
+        scope=scope, value_per_year=float(k_mass), ci_low=ci_lo, ci_high=ci_hi,
+        half_life_years=RateEstimate.half_life(k_mass), n=int(len(f)), trend=trend,
+        confidence=conf, removes_dilution=False, diagnostics=diagnostics, notes=notes,
+    )
+
+
+def estimate_site_both(site: SiteObservations,
+                       cfg: SplineConfig = SplineConfig()) -> tuple[RateEstimate, RateEstimate]:
+    """Both module-3 estimands from ONE surface fit: (k_centre estimate, k_mass estimate).
+
+    Prefer this over calling ``estimate_site`` and ``estimate_site_mass`` separately, which fits
+    the REML surface twice. The two results are different quantities and are never combined.
+    """
+    prep, reason = _prepare(site, cfg)
+    if prep is None:
+        return (RateEstimate.not_applicable(METHOD_ST_PSPLINE, "site", reason),
+                RateEstimate.not_applicable(METHOD_ST_PSPLINE_MASS, "site", reason))
+    return _centre_estimate(site, prep, cfg), _mass_estimate(site, prep, cfg)
