@@ -5,3 +5,9 @@ __pycache__/
 .venv/
 venv/
 outputs/
+
+# Reference papers read while working on the methods. This repository is public, and most of
+# these are publisher PDFs that we have a licence to read but not to redistribute, so they must
+# never be committed. Cite them in docs/RATE-ESTIMATION-LITERATURE.md instead. If a genuinely
+# open-access or self-authored PDF ever needs to ship, add it with `git add -f`.
+*.pdf
