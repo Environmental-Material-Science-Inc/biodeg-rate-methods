@@ -2,9 +2,19 @@
 
 The robust literature default for benzene is the McHugh et al. (2023) median first-order
 attenuation rate from 1905 California GeoTracker (LUST) petroleum sites: 0.14/yr (half-life
-4.9 yr; 82% of sites attenuating). That paper's central finding is that a portfolio median is a
-better predictor of a site's future attenuation than the site's own historical rate, which is
-exactly why it is our robust prior and the anchor for an informed (prior + site) estimate.
+4.9 yr; 82% of sites attenuating).
+
+What that paper SHOWS: a site's own historical concentration-vs-time attenuation rate is a poor
+predictor of its own future rate. Splitting each monitoring record in half gives a small NEGATIVE
+correlation between the halves (r ~ -0.11 benzene, -0.12 MTBE and TCE), and the result survives
+restriction to records with good model fits, to records with a significant first-half trend, and
+to records with no change in remedy.
+
+What we ASSUME on top of that: because the site's own history does not predict its future, the
+population median is the better anchor for a forecast. The paper does not test the portfolio
+median as a predictor, so this step is our inference and not its finding. It is the load-bearing
+assumption under the informed prior below: if it is wrong, the combine is anchored to the wrong
+quantity. See docs/RATE-ESTIMATION-LITERATURE.md section 6.
 
 Estimand note (honesty contract): McHugh's k_c-max is an APPARENT first-order
 concentration-vs-time attenuation rate (it lumps source decline, dilution, and reaction). It is
@@ -13,8 +23,9 @@ site rate. It is NOT a dilution-removed reaction rate (Method 2); when a reliabl
 exists, the handoff still prefers it for the mechanistic MODFLOW decay term.
 
 The combine is a conjugate Gaussian update in log space (rates are positive, multiplicative). The
-QA/QC rule: if the site estimate falls OUTSIDE the prior's population CI, flag it for engineer
-review (per the paper, a lone site estimate that disagrees with the population is suspect).
+QA/QC rule (ours, not the paper's): if the site estimate falls OUTSIDE the prior's population CI,
+flag it for engineer review, on the grounds that a lone site estimate disagreeing with a
+population of 1905 is more often a data problem than a real outlier.
 """
 
 from __future__ import annotations
@@ -62,8 +73,9 @@ LITERATURE_PRIORS: dict[str, LiteraturePrior] = {
         n_sites=1905, half_life_years=4.9,
         note=("Apparent concentration-vs-time attenuation rate (bulk; comparable to Method 1, "
               "not a dilution-removed reaction rate). 82% of sites attenuating; the CI is the "
-              "empirical population 5th-95th percentile. Population median is a more robust "
-              "predictor than a single site's history.")),
+              "empirical population 5th-95th percentile. The paper shows a site's own history "
+              "predicts its own future rate poorly (r ~ -0.11); anchoring on the population "
+              "median instead is our assumption, not the paper's finding.")),
 }
 
 

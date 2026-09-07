@@ -50,6 +50,11 @@ concentration-versus-time rate, the combine uses **Method 1 only**, as a conjuga
 update in log space. A site estimate falling outside the population band is flagged for
 review rather than used.
 
+What the paper establishes is that a site's own historical rate predicts its own future rate
+poorly (r of about -0.11). Anchoring on the population median instead is our assumption rather
+than the paper's finding, and it is load-bearing: see `docs/RATE-ESTIMATION-LITERATURE.md`
+section 6.
+
 `handoff.py` collects the estimates into a `SiteRateBundle`, records a menu with one entry per
 method and the caveat attached to each, runs an order-of-magnitude consistency check that
 never averages, and emits a MODFLOW 6 GWT-MST first-order decay block in 1/day. It leaves

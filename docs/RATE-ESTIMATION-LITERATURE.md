@@ -209,13 +209,15 @@ journal article, so it is not indexed by the search used here. Every statement a
 document is second-hand through Zhang [3] and Stenback [4]. Obtain the primary reference before
 citing it in a regulatory submission.
 
-**`biodeg_rates/prior.py` overstates what McHugh proves.** Its module docstring states that the
-paper's central finding is that a portfolio median predicts a site's future attenuation better
-than the site's own historical rate. The paper establishes the first half of that claim, namely
-that a site's own history is a poor predictor, with r of about -0.11 [24]. It does not, in its
-abstract, claim that the population median is a better predictor. That step is our inference, and
-it is the load-bearing assumption under the informed-prior combine in `prior.py`. It should be
-stated as an assumption rather than attributed to the paper.
+**The population-median anchor is our assumption, not McHugh's finding (corrected in the code).**
+The paper establishes that a site's own history is a poor predictor of its own future rate, with
+r of about -0.11 [24]. It does not test the portfolio median as a predictor, so the step from
+"site history does not predict" to "use the population median instead" is our inference. It is
+the load-bearing assumption under the informed-prior combine: if it is wrong, the combine is
+anchored to the wrong quantity. Earlier versions of `biodeg_rates/prior.py` attributed this step
+to the paper; the module docstring and the prior's `note` field now separate what the paper shows
+from what we assume. The plausibility check that flags a site estimate outside the population band
+is likewise our rule, not the paper's.
 
 **The McHugh volume, issue and page range** recorded in `CITATION.cff` and `prior.py` come from
 our own records, not from the search result. The title and journal have been verified.
