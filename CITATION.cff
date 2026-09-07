@@ -18,8 +18,10 @@ references:
   - type: article
     authors:
       - family-names: McHugh
-        given-names: Thomas
-    title: "Sustained natural attenuation of petroleum hydrocarbon plumes"
+        given-names: "Thomas E."
+    title: >-
+      Forecasting Groundwater Remediation Timeframes: Site-Specific Temporal Monitoring
+      Results May Not Predict Future Performance
     journal: "Groundwater Monitoring & Remediation"
     volume: 43
     issue: 4
@@ -27,5 +29,8 @@ references:
     end: 103
     year: 2023
     notes: >-
-      TODO confirm the full author list and the exact title against the paper before
-      publication. The rate figures used in prior.py are computed from this paper's Data S1.
+      Title and journal verified against the published record; the volume, issue and page
+      range come from the citation recorded in biodeg_rates/prior.py and have not been
+      independently checked. The co-author list is not yet filled in. The benzene rate
+      figures used in prior.py (median 0.14/yr, n=1905 GeoTracker sites, 5th-95th
+      percentile -0.15 to 0.53/yr) are computed from this paper's Data S1.
